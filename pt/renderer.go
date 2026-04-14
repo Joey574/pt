@@ -45,14 +45,86 @@ func NewRenderer(scene *Scene, camera *Camera, sampler Sampler, w, h int) *Rende
 	return &r
 }
 
-func (r *Renderer) run() {
+func (r *Renderer) stratifiedSampling(x, y int, rnd *rand.Rand) {
 	scene := r.Scene
 	camera := r.Camera
 	sampler := r.Sampler
 	buf := r.Buffer
 	w, h := buf.W, buf.H
-	spp := r.SamplesPerPixel
 	sppRoot := int(math.Sqrt(float64(r.SamplesPerPixel)))
+
+	// stratified subsampling
+	for u := 0; u < sppRoot; u++ {
+		for v := 0; v < sppRoot; v++ {
+			fu := (float64(u) + 0.5) / float64(sppRoot)
+			fv := (float64(v) + 0.5) / float64(sppRoot)
+			ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
+			sample := sampler.Sample(scene, ray, rnd)
+			buf.AddSample(x, y, sample)
+		}
+	}
+}
+
+func (r *Renderer) randomSubsampling(x, y int, rnd *rand.Rand) {
+	scene := r.Scene
+	camera := r.Camera
+	sampler := r.Sampler
+	spp := r.SamplesPerPixel
+	buf := r.Buffer
+	w, h := buf.W, buf.H
+
+	for i := 0; i < spp; i++ {
+		fu := rnd.Float64()
+		fv := rnd.Float64()
+		ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
+		sample := sampler.Sample(scene, ray, rnd)
+		buf.AddSample(x, y, sample)
+	}
+}
+
+func (r *Renderer) adaptiveSampling(x, y int, rnd *rand.Rand) {
+	scene := r.Scene
+	camera := r.Camera
+	sampler := r.Sampler
+	buf := r.Buffer
+	w, h := buf.W, buf.H
+
+	v := buf.StandardDeviation(x, y).MaxComponent()
+	v = Clamp(v/r.AdaptiveThreshold, 0, 1)
+	v = math.Pow(v, r.AdaptiveExponent)
+	samples := int(v * float64(r.AdaptiveSamples))
+	for i := 0; i < samples; i++ {
+		fu := rnd.Float64()
+		fv := rnd.Float64()
+		ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
+		sample := sampler.Sample(scene, ray, rnd)
+		buf.AddSample(x, y, sample)
+	}
+}
+
+func (r *Renderer) fireflyReduction(x, y int, rnd *rand.Rand) {
+	scene := r.Scene
+	camera := r.Camera
+	sampler := r.Sampler
+	buf := r.Buffer
+	w, h := buf.W, buf.H
+
+	if buf.StandardDeviation(x, y).MaxComponent() > r.FireflyThreshold {
+		for i := 0; i < r.FireflySamples; i++ {
+			fu := rnd.Float64()
+			fv := rnd.Float64()
+			ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
+			sample := sampler.Sample(scene, ray, rnd)
+			buf.AddSample(x, y, sample)
+		}
+	}
+}
+
+func (r *Renderer) run() {
+	scene := r.Scene
+	buf := r.Buffer
+	w, h := buf.W, buf.H
+	spp := r.SamplesPerPixel
 	ncpu := r.NumCPU
 
 	runtime.GOMAXPROCS(ncpu)
@@ -61,63 +133,32 @@ func (r *Renderer) run() {
 	r.printf("%d x %d pixels, %d spp, %d cores\n", w, h, spp, ncpu)
 	start := time.Now()
 	scene.rays = 0
+
 	for i := 0; i < ncpu; i++ {
 		go func(i int) {
+			r.printf("thread (%d)\n", i)
 			rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 			for y := i; y < h; y += ncpu {
 				for x := 0; x < w; x++ {
 					if r.StratifiedSampling {
-						// stratified subsampling
-						for u := 0; u < sppRoot; u++ {
-							for v := 0; v < sppRoot; v++ {
-								fu := (float64(u) + 0.5) / float64(sppRoot)
-								fv := (float64(v) + 0.5) / float64(sppRoot)
-								ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
-								sample := sampler.Sample(scene, ray, rnd)
-								buf.AddSample(x, y, sample)
-							}
-						}
+						r.stratifiedSampling(x, y, rnd)
 					} else {
-						// random subsampling
-						for i := 0; i < spp; i++ {
-							fu := rnd.Float64()
-							fv := rnd.Float64()
-							ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
-							sample := sampler.Sample(scene, ray, rnd)
-							buf.AddSample(x, y, sample)
-						}
+						r.randomSubsampling(x, y, rnd)
 					}
 					// adaptive sampling
 					if r.AdaptiveSamples > 0 {
-						v := buf.StandardDeviation(x, y).MaxComponent()
-						v = Clamp(v/r.AdaptiveThreshold, 0, 1)
-						v = math.Pow(v, r.AdaptiveExponent)
-						samples := int(v * float64(r.AdaptiveSamples))
-						for i := 0; i < samples; i++ {
-							fu := rnd.Float64()
-							fv := rnd.Float64()
-							ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
-							sample := sampler.Sample(scene, ray, rnd)
-							buf.AddSample(x, y, sample)
-						}
+						r.adaptiveSampling(x, y, rnd)
 					}
 					// firefly reduction
 					if r.FireflySamples > 0 {
-						if buf.StandardDeviation(x, y).MaxComponent() > r.FireflyThreshold {
-							for i := 0; i < r.FireflySamples; i++ {
-								fu := rnd.Float64()
-								fv := rnd.Float64()
-								ray := camera.CastRay(x, y, w, h, fu, fv, rnd)
-								sample := sampler.Sample(scene, ray, rnd)
-								buf.AddSample(x, y, sample)
-							}
-						}
+						r.fireflyReduction(x, y, rnd)
 					}
 				}
 				ch <- 1
 			}
 		}(i)
 	}
+
 	r.showProgress(start, scene.RayCount(), 0, h)
 	for i := 0; i < h; i++ {
 		<-ch
