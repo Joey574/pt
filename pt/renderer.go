@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type Renderer struct {
@@ -136,7 +138,9 @@ func (r *Renderer) run() {
 
 	for i := 0; i < ncpu; i++ {
 		go func(i int) {
-			runtime.LockOSThread()
+			var cpuset unix.CPUSet
+			cpuset.Set(i)
+			unix.SchedSetaffinity(0, &cpuset)
 
 			rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 			for y := i; y < h; y += ncpu {
