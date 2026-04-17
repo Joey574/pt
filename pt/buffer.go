@@ -17,7 +17,6 @@ const (
 type Pixel struct {
 	Samples int
 	M, V    Color
-	pad     int
 }
 
 func (p *Pixel) AddSample(sample Color) {
